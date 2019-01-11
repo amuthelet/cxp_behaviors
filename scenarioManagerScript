@@ -1,0 +1,840 @@
+// Parameters
+// scenarioUI (UIActor)
+// fadeBlackUI (UIImage)
+// easingFunctionsHolder (LogicalActor)
+// thumbnails (bool: false)
+// thumbnailActor (Actor)
+// resetActorsWhenActivatingSlide (bool: false)
+// shootMode (integer:0)
+// visibilityMode (boo:true)
+
+STU.RenderManager.getInstance().main3DViewpoint.__stu__SetClippingValue(100, 100000000);
+
+beScript.onStart = function() {
+
+    var visu = new CXPVisuServices();
+
+    // please have a look at VisualizationFoundation/ProtectedInterfaces/VisCustomizeShadows.h 
+    // for more information on parameters values
+    // please remember that enums values start at 0
+    visu.customizeShadows(0, 1, true, 0);
+    visu.customizeCascade(4, 100000000, 75);
+    visu.customizeCascadeSplit(1, 0.8);
+    visu.customizeCascadeExtendedFrustum(1, 0.2);
+
+
+    //Will be called on the experience start.
+    EP.EventServices.addObjectListener(EP.GamepadPressEvent, this, 'onAllGamepadPressEvent');
+
+    STU._taskScheduler = STU.Experience.getCurrent().getBehaviorByType('TaskScheduler');
+
+    if (STU._taskScheduler == undefined) {
+        console.log('warning ... scenarioManager require TaskScheduler in the scene');
+    };
+
+    this.rm = STU.RenderManager.getInstance();
+    this.currentSlide = 0;
+    this.previousSlide = -1;
+    this.testSlideDuration = true;
+
+    // Test params
+    if (this.scenarioUI === null || this.scenarioUI === undefined) {
+        console.error("Invalid scenarioUI actor");
+    } else {
+        this.scenarioUI.addObjectListener(STU.UIWebMessageReceivedEvent, this, 'UIWebMessageReceived');
+    }
+
+    if (this.fadeToBlackUI === null || this.fadeToBlackUI === undefined) {
+        console.error("Could not find fade to black UI");
+    } else {
+        this.fadeToBlackUI.minimumDimention = new STU.Dimension(100.0, 100.0, 1);
+    }
+
+    if (this.thumbnails === null || this.thumbnails === undefined) {
+        console.error("Could not find thumbnails, default to false");
+        this.thumbnails = false;
+    }
+
+    if (this.easingFunctionsHolder === null || this.easingFunctionsHolder === undefined) {
+        console.error("Could not find easing Functions holder");
+    } else {
+        if (this.easingFunctionsHolder.easingFunctionsScript === null || this.easingFunctionsHolder.easingFunctionsScript === undefined) {
+            console.error("Could not find easingFunctionsScript on easingFunctionsHolder");
+        } else {
+            this.easingFunctionsHolder.easingFunctionsScript.init();
+            this.easing = this.easingFunctionsHolder.easingFunctionsScript.easing;
+            //console.log(this.easing);
+        }
+    }
+
+    if (this.visibilityMode === null || this.visibilityMode === undefined) {
+        console.error("Could not find visibilityMode, default to true");
+        this.visibilityMode = true;
+    }
+
+    var scenarioContent = this.getActor().scenarioContentScript;
+    if (scenarioContent === null || scenarioContent === undefined) {
+        console.error("Scenario has no scenarioContentScript");
+    }
+
+    // Fill content object
+    scenarioContent.init();
+    this.data = scenarioContent.data;
+    if (this.data === null || this.data === undefined) {
+        console.error("Could not initialize data array !!");
+    }
+
+    // Find content actors by name in current Experience
+    this.initData();
+    this.computeSlidesVisibilityList(this.visibilityMode);
+
+    // List of actors to be faded in / out
+    this.smoothFadeList = [];
+
+    // Fading durations init if not found as beh param
+
+    // easing function names
+    if (this.fadeInEasingFunction === null || this.fadeInEasingFunction === undefined) {
+        this.fadeInEasingFunction = "easeInSine";
+    }
+    if (this.easing[this.fadeInEasingFunction] === null || this.easing[this.fadeInEasingFunction] === undefined) {
+        console.error("Invalid fadeIn easing function name");
+    }
+
+    if (this.fadeOutEasingFunction === null || this.fadeOutEasingFunction === undefined) {
+        this.fadeOutEasingFunction = "easeOutSine";
+    }
+    if (this.easing[this.fadeOutEasingFunction] === null || this.easing[this.fadeOutEasingFunction] === undefined) {
+        console.error("Invalid fadeOut easing function name");
+    }
+
+    if (this.fadeInOutEasingFunction === null || this.fadeInOutEasingFunction === undefined) {
+        this.fadeInOutEasingFunction = "easeInOutSine";
+    }
+    if (this.easing[this.fadeInOutEasingFunction] === null || this.easing[this.fadeInOutEasingFunction] === undefined) {
+        console.error("Invalid fadeInOut easing function name");
+    }
+
+    // easing durations
+    if (this.fadeInDuration === null || this.fadeInDuration === undefined) {
+        this.fadeInDuration = 500;
+        console.log("fadeInDuration param not found, defaulted to 500");
+    }
+    if (this.fadeOutDuration === null || this.fadeOutDuration === undefined) {
+        this.fadeOutDuration = 500;
+        console.log("fadeOutDuration param not found, defaulted to 500");
+    }
+    if (this.fadeInOutDuration === null || this.fadeInOutDuration === undefined) {
+        this.fadeInOutDuration = 500;
+        console.log("fadeInOutDuration param not found, defaulted to 500");
+    }
+    /*
+        this.activateSlide(0);
+        if (this.data[this.currentSlide].visible) {
+            this.sendDataToWeb("changeFocus", this.currentSlide);
+        }
+    */
+    this.delayedTasks = [];
+
+};
+
+// Retrieve content by name
+beScript.initData = function() {
+
+    for (var noSlide = 0; noSlide < this.data.length; noSlide++) {
+        var slide = this.data[noSlide];
+        slide.actionsActors = new Array();
+        //console.log("Init slide: " + slide.shortDesc );
+        for (var noAction = 0; noAction < slide.actions.length; noAction++) {
+            if (slide.actions[noAction].actor === null || slide.actions[noAction].actor === undefined) {
+                slide.actions[noAction].actor = STU.Experience.getCurrent().getActorByName(slide.actions[noAction].actorName, true);
+
+                var result = slide.actionsActors.find(x => x.name === slide.actions[noAction].actorName)
+                if ((result === undefined) && (slide.actions[noAction].actor !== null) && (slide.actions[noAction].actor !== undefined)) {
+                    //console.log("  solving slide actor: " + slide.actions[noAction].actorName );
+                    slide.actionsActors.push(slide.actions[noAction].actor);
+                }
+            }
+
+            //console.log("solving param: " + slide.actions[noAction].actionParams );
+            if (Number.isInteger(slide.actions[noAction].actionParams)) {
+                slide.actions[noAction].actionParamsResolved = slide.actions[noAction].actionParams;
+            } else {
+                switch (slide.actions[noAction].actionParams) {
+                    case "true":
+                        slide.actions[noAction].actionParamsResolved = true;
+                        break;
+                    case "false":
+                        slide.actions[noAction].actionParamsResolved = false;
+                        break;
+                    default:
+                        if (slide.actions[noAction].actionParams !== null && slide.actions[noAction].actionParams !== undefined) {
+                            if (slide.actions[noAction].actionParams.indexOf("text:") !== -1) {
+                                slide.actions[noAction].actionParamsResolved = "                 " + slide.actions[noAction].actionParams.slice(slide.actions[noAction].actionParams.indexOf("text:") + 5);
+                            } else {
+                                slide.actions[noAction].actionParamsResolved = STU.Experience.getCurrent().getActorByName(slide.actions[noAction].actionParams, true);
+                            }
+                        }
+                }
+            }
+        }
+
+        slide.showListActors = [];
+        for (var noElmt = 0; noElmt < slide.showList.length; noElmt++) {
+            slide.showListActors.push(STU.Experience.getCurrent().getActorByName(slide.showList[noElmt], true));
+        }
+
+        slide.hideListActors = [];
+        for (var noElmt = 0; noElmt < slide.hideList.length; noElmt++) {
+            slide.hideListActors.push(STU.Experience.getCurrent().getActorByName(slide.hideList[noElmt], true));
+        }
+    }
+
+    if (this.thumbnails === true) {
+        for (var noElmt = 0; noElmt < this.data.length; noElmt++) {
+            var cam = STU.Experience.getCurrent().getActorByName(this.data[noElmt].cameraName, true);
+            if (cam === null || cam === undefined) {
+                console.error("Could not find camera: " + this.data[noElmt].cameraName);
+            } else {
+                console.log("Init slide #" + this.data[noElmt].shortDesc + ", camera found: " + this.data[noElmt].cameraName);
+                this.data[noElmt].cameraThumbnail = this.createThumbnail(cam);
+                //console.log("Motion vec: " + this.data[noElmt].motionVec.x + ", " + this.data[noElmt].motionVec.y + ", " + this.data[noElmt].motionVec.z);
+            }
+        }
+    }
+
+    this.sendDataToWeb("initData", this.data);
+
+    for (var noElmt = 0; noElmt < this.data.length; noElmt++) {
+        var cam = STU.Experience.getCurrent().getActorByName(this.data[noElmt].cameraName, true);
+        if (cam === null || cam === undefined) {
+            console.error("Could not find camera: " + this.data[noElmt].cameraName);
+        } else {
+            console.log("Init slide #" + this.data[noElmt].shortDesc + ", camera found: " + this.data[noElmt].cameraName);
+            this.data[noElmt].camera = cam;
+            //console.log("Motion vec: " + this.data[noElmt].motionVec.x + ", " + this.data[noElmt].motionVec.y + ", " + this.data[noElmt].motionVec.z);
+        }
+    }
+};
+
+beScript.onStop = function() {
+    //Will be called on experience stop.
+};
+
+beScript.execute = function(context) {
+    var currentTime = new Date().getTime();
+
+    // Manage slide duration, if defined
+    if (this.data[this.currentSlide].automaticMode === true) {
+        //console.log("Slide: " + this.currentSlide + " is auto mode");
+        if (this.testSlideDuration) {
+            var slideDuration = this.data[this.currentSlide].duration;
+            // If slide duration is defined, then activate next slide
+            if (slideDuration !== null && slideDuration !== undefined) {
+                if (currentTime - this.currentSlideActivationTime > slideDuration) {
+                    //console.log("Slide: " + this.currentSlide + " ends");
+                    this.activateSlide((++this.currentSlide).toString() % this.data.length);
+                    if (this.data[this.currentSlide].visible) {
+                        this.sendDataToWeb("changeFocus", this.currentSlide);
+                    };
+                    //this.testSlideDuration = false;
+                }
+            }
+        }
+    }
+
+    // Manage fade in/out list
+    this.smoothFadeActorsTimeBase(this.smoothFadeList);
+};
+
+beScript.smoothFadeActorsTimeBase = function(iList) {
+    for (var noObject = 0; noObject < iList.length; noObject++) {
+        var actor = iList[noObject].actor;
+        // If actor has opacity member
+        if (actor.opacity !== null && actor.opacity !== undefined) {
+            // Fade in(0) / out(1) / inOut(2) mode ?
+            switch (iList[noObject].mode) {
+                case 0: // fade IN
+                    // If actor is not visible, then start fade in
+                    if (actor.visible === false) {
+                        console.log("starting fadeIn");
+                        actor.visible = true;
+                        this.scenarioUI.visible = false;
+                        this.scenarioUI.visible = true;
+                        actor.opacity = 0.0;
+                        // Initialize easing parameters
+                        iList[noObject].easing = { startingTime: new Date().getTime(), percentage: null, elapsedTime: 0 };
+                    }
+                    // Continue fading 
+                    iList[noObject].easing.elapsedTime = new Date().getTime() - iList[noObject].easing.startingTime;
+                    // Call easing function to compute new opacity value
+                    var newOpacity = this.easing[iList[noObject].easingFunction]( /*x*/ iList[noObject].easing.percentage, /*t*/ iList[noObject].easing.elapsedTime, /*b*/ 0, /*c*/ 1, /*d*/ iList[noObject].duration);
+                    //console.log("fadeIn opac: " + newOpacity);
+                    // If end of fade in
+                    if (newOpacity >= 0.9) {
+                        console.log("ending fadeIn");
+                        // set opacity to 1 and remove object from fade list
+                        actor.opacity = 1.0;
+                        iList.splice(noObject, 1);
+                    } else { // If fade in is not finished
+                        // update actor opacity with output of easing function
+                        actor.opacity = newOpacity;
+                    }
+                    break;
+                case 1: // fade OUT
+                    // If opacity = 1.0, let's consider its a start state (..)
+                    if (iList[noObject].firstIterationFadeOut === true) {
+                        console.log("starting fadeOut");
+                        iList[noObject].firstIterationFadeOut = false;
+                        iList[noObject].easing = { startingTime: new Date().getTime(), percentage: null, elapsedTime: 0 };
+                    }
+                    // Continue fading 
+                    iList[noObject].easing.elapsedTime = new Date().getTime() - iList[noObject].easing.startingTime;
+                    // Call easing function to compute new opacity value
+                    var newOpacity = this.easing[iList[noObject].easingFunction]( /*x*/ iList[noObject].easing.percentage, /*t*/ iList[noObject].easing.elapsedTime, /*b*/ 1, /*c*/ -1, /*d*/ iList[noObject].duration);
+                    //console.log("fadeOut opac: " + newOpacity);
+                    if (newOpacity <= 0.1) {
+                        console.log("ending fadeOut");
+                        actor.opacity = 0.0;
+                        actor.visible = false;
+                        iList.splice(noObject, 1);
+                    } else {
+                        actor.opacity = newOpacity;
+                    }
+                    break;
+                case 2: // fade IN then OUT
+                    if (actor.visible === false) {
+                        console.log("starting fadeInOut");
+                        actor.visible = true;
+                        this.scenarioUI.visible = false;
+                        this.scenarioUI.visible = true;
+
+                        actor.opacity = 0.0;
+                        iList[noObject].easing = { startingTime: new Date().getTime(), percentage: null, elapsedTime: 0 };
+                    }
+                    // Continue fading 
+                    iList[noObject].easing.elapsedTime = new Date().getTime() - iList[noObject].easing.startingTime;
+                    // Call easing function to compute new opacity value
+                    var newOpacity = this.easing[iList[noObject].easingFunction]( /*x*/ iList[noObject].easing.percentage, /*t*/ iList[noObject].easing.elapsedTime, /*b*/ 0, /*c*/ 1, /*d*/ iList[noObject].duration / 2.0);
+                    //console.log("fadeInOut opac: " + newOpacity);
+                    if (newOpacity >= 0.9) {
+                        console.log("in the middle of fadeInOut");
+                        actor.opacity = 1.0;
+                        if (iList[noObject].activateSlideCallback !== null && iList[noObject].activateSlideCallback !== undefined) {
+                            iList[noObject].activateSlideCallback();
+                        }
+                        var fadeObject = {
+                            actor: actor,
+                            mode: 1,
+                            duration: iList[noObject].duration / 2.0,
+                            activateSlideCallback: iList[noObject].activateSlideCallback,
+                            easingFunction: this.fadeInOutEasingFunction,
+                            firstIterationFadeOut: true
+                        };
+                        this.smoothFadeList.push(fadeObject);
+                        iList.splice(noObject, 1);
+                        actor.visible = false;
+                        actor.visible = true;
+                        this.scenarioUI.visible = false;
+                        this.scenarioUI.visible = true;
+
+                    } else {
+                        actor.opacity = newOpacity;
+                    }
+                    break;
+            }
+        }
+    }
+};
+
+// Activate slide from ID
+beScript.activateSlide = function(iSlideID, iSearchMode /*0 by ID, 1 by shortDesc*/ ) {
+    //console.log("Activating slide#" + iSlideID);
+
+    // activateSlideCallback, to be executed after black fade in / fade out transition is finished
+    var myThis = this;
+    var slide;
+    if (iSearchMode === true) {
+        // Find slide in the array of slides
+        slide = myThis.data.filter(function(item) {
+            return (item.shortDesc === iSlideID);
+        })[0];
+
+    } else {
+        // Find slide in the array of slides
+        slide = myThis.data.filter(function(item) {
+            return (item.id == iSlideID);
+        })[0];
+
+    }
+
+    if (slide === null || slide === undefined) {
+        console.error("Could not find slide#" + iSlideID);
+    }
+
+    var activateSlideCallback = function() {
+        iSlideID = iSlideID.toString();
+
+        //console.log("Activating slide " + slide.shortDesc);
+        //  Reset currentSlide state before switching to the next one 
+        // Reset transfo, from action list actors only..)
+        if (myThis.resetActorsWhenActivatingSlide === true) {
+            for (var noElmt = 0; noElmt < slide.actionsActors.length; noElmt++) {
+                if (typeof slide.actionsActors[noElmt].setTransform === "function") {
+                    //console.log("Reseting transfo of: " + slide.shortDesc + ": " +  slide.actionsActors[noElmt].name);
+                    slide.actionsActors[noElmt].setTransform(slide.actionsActors[noElmt].initialTransfo);
+                }
+            }
+        }
+
+        // Reset visibility
+        for (var noElmt = 0; noElmt < slide.visibilityList.length; noElmt++) {
+            if (slide.visibilityList[noElmt].actor.visible !== slide.visibilityList[noElmt].visibility) {
+                slide.visibilityList[noElmt].actor.visible = slide.visibilityList[noElmt].visibility;
+                //console.log("setting visibility of: " + slide.visibilityList[noElmt].actor.name + " to: " + slide.visibilityList[noElmt].visibility);
+            }
+        }
+
+        // change currentSlide
+        myThis.previousSlide = myThis.currentSlide;
+        myThis.currentSlide = slide.id;
+        myThis.currentSlideActivationTime = new Date().getTime();
+        myThis.testSlideDuration = true;
+
+        if (slide.startViewFromPrevious === true) {
+            var currentCam = myThis.rm.getCurrentCamera();
+            if ((myThis.rm.getCurrentCamera().name.indexOf("_left") !== -1) || (myThis.rm.getCurrentCamera().name.indexOf("_right")) !== -1) {
+                //console.log("startFromPrevious: this is a child cam");
+                currentCam = currentCam.getParent();
+            }
+
+            if (currentCam instanceof STU.Camera) {
+                //console.log("Setting Cut on: " + slide.camera.name + ", from: " + currentCam.name);
+                slide.camera.setTransform(currentCam.getTransform());
+                slide.camera.focalLength = currentCam.focalLength;
+            } else {
+                //console.error("startFromPrevious: currentCam parent is not a camera");
+            }
+        }
+        // Set current Cam
+        switch (myThis.shootMode) {
+            case 0: //center
+                if ((slide.camera !== null) && (slide.camera !== undefined)) {
+                    myThis.rm.setCurrentCamera(slide.camera);
+                }
+                break;
+            case 1: //left
+                var leftCam = STU.Experience.getCurrent().getActorByName(slide.camera.name + "_left", true);
+                if (leftCam !== null && leftCam !== undefined) {
+                    myThis.rm.setCurrentCamera(leftCam);
+                } else {
+                    console.error("Could not find camera: " + slide.camera.name + "_left");
+                }
+                break;
+            case 2: //right
+                var rightCam = STU.Experience.getCurrent().getActorByName(slide.camera.name + "_right", true);
+                if (rightCam !== null && rightCam !== undefined) {
+                    myThis.rm.setCurrentCamera(rightCam);
+                } else {
+                    console.error("Could not find camera: " + slide.camera.name + "_right");
+                }
+                break;
+            default: //center
+                myThis.rm.setCurrentCamera(slide.camera);
+                break;
+        }
+
+        // Manage slide action triggers
+        if (slide.actions !== null && slide.actions !== undefined) {
+            for (var noAction = 0; noAction < slide.actions.length; noAction++) {
+                var actor = slide.actions[noAction].actor;
+                if (actor === null || actor === undefined) {
+                    console.error("Could not get actor: " + slide.actions[noAction].actorName);
+                } else {
+                    //console.log("Found actor: " + slide.actions[noAction].actorName);
+                    var beh = null;
+                    if (slide.actions[noAction].behName !== "") {
+                        beh = actor[slide.actions[noAction].behName];
+                    } else {
+                        beh = actor;
+                    }
+                    if (beh === null || beh === undefined) {
+                        console.error("Could not get beh: " + slide.actions[noAction].behName);
+                    } else {
+                        //console.log("Launching beh: " + slide.actions[noAction].actorName + "." + slide.actions[noAction].behName + "." + slide.actions[noAction].actionName + "(" + slide.actions[noAction].actionParams + ")");
+                        var param;
+                        if (Number.isInteger(slide.actions[noAction].actionParams)) {
+                            param = slide.actions[noAction].actionParams;
+                        } else {
+                            switch (slide.actions[noAction].actionParams) {
+                                case "true":
+                                    param = true;
+                                    break;
+                                case "false":
+                                    param = false;
+                                    break;
+                                default:
+                                    if (slide.actions[noAction].actionParams !== null && slide.actions[noAction].actionParams !== undefined) {
+                                        param = slide.actions[noAction].actionParamsResolved;
+                                        break;
+                                    }
+                            }
+                        }
+                        if (slide.actions[noAction].delay !== null && slide.actions[noAction].delay !== undefined) {
+                            var currentTime = new Date().getTime();
+                            var newTask = {};
+
+                            newTask.startTime = currentTime;
+                            newTask.delay = slide.actions[noAction].delay;
+                            newTask.actorName = slide.actions[noAction].actorName;
+                            newTask.actor = actor;
+                            newTask.taskName = slide.actions[noAction].behName;
+                            newTask.slide = slide;
+                            newTask.noAction = noAction;
+                            newTask.done = false;
+
+                            var actionName = slide.actions[noAction].actionName;
+                            var behaviour = beh;
+                            var parameter = param;
+                            var func = behaviour[actionName];
+
+
+                            STU._taskScheduler.executeWithDelay(behaviour, func.bind(behaviour, param), slide.actions[noAction].delay, function() { return; });
+                        } else {
+                            beh[slide.actions[noAction].actionName](param);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Manage slide showList for 2D UI (3D is managed through slide visibilityList)
+        if (slide.showList !== null && slide.showList !== undefined) {
+            for (var noActor = 0; noActor < slide.showList.length; noActor++) {
+                var actor = slide.showListActors[noActor]; //STU.Experience.getCurrent().getActorByName(slide.showList[noActor], true);
+                if (actor !== null && actor !== undefined) {
+                    if (actor instanceof STU.UIActor) {
+                        var fadeObject = {
+                            actor: actor,
+                            mode: 0,
+                            duration: myThis.fadeInDuration * 3.0,
+                            easingFunction: myThis.fadeInOutEasingFunction,
+                            firstIterationFadeOut: true
+
+                        };
+                        //myThis.smoothFadeList.push(fadeObject);
+                        if (actor.visible === false) {
+                            actor.visible = true;
+                        }
+                        if (actor.enable !== null && actor.enable !== undefined) {
+                            actor.enable = true;
+                        }
+                    }
+                } else {
+                    console.error("Could not find actor in showList: " + slide.showList[noActor]);
+                }
+            }
+        }
+
+        // Manage slide hideList
+        if (slide.hideList !== null && slide.hideList !== undefined) {
+            for (var noActor = 0; noActor < slide.hideList.length; noActor++) {
+                var actor = slide.hideListActors[noActor]; //STU.Experience.getCurrent().getActorByName(slide.hideList[noActor], true);
+                if (actor !== null && actor !== undefined) {
+                    if (actor instanceof STU.UIActor) {
+                        var fadeObject = {
+                            actor: actor,
+                            mode: 1,
+                            duration: myThis.fadeOutDuration,
+                            easingFunction: myThis.fadeInOutEasingFunction,
+                            firstIterationFadeOut: true
+                        };
+                        //myThis.smoothFadeList.push(fadeObject);
+                        if (actor.visible === true) {
+                            actor.visible = false;
+                        }
+                        if (actor.enable !== null && actor.enable !== undefined) {
+                            actor.enable = false;
+                        }
+                    }
+                } else {
+                    console.error("Could not find actor in hideList: " + slide.hideList[noActor]);
+                }
+            }
+        }
+    };
+
+    // Create fade object for fade to black slide transition
+    var fadeObjectBlack = {
+        actor: this.fadeToBlackUI,
+        mode: 2,
+        duration: this.fadeInOutDuration,
+        activateSlideCallback: activateSlideCallback,
+        easingFunction: this.fadeInOutEasingFunction
+    };
+
+    // Add fade object to list that is processed inside execute loop
+    /*
+        var iSlideID = iSlideID.toString();
+        var slide = this.data.filter(function(item) {
+            return (item.id === iSlideID);
+        })[0];
+    */
+    if (slide.fadeout === true) {
+        this.smoothFadeList.push(fadeObjectBlack);
+    } else {
+        activateSlideCallback();
+    }
+};
+
+beScript.computeSlidesVisibilityList = function(iVisibilityMode) {
+    if (iVisibilityMode === true) {
+        for (var noSlide = 0; noSlide < this.data.length; noSlide++) {
+            var slide = this.data[noSlide];
+            slide.visibilityList = [];
+
+            var experienceActors = STU.Experience.getCurrent().getAllActors();
+            for (var noActor = 0; noActor < experienceActors.length; noActor++) {
+                // save transfo before launching beh (to be able to reset at the end of the slide)
+                if (experienceActors[noActor].getTransform !== undefined) {
+                    experienceActors[noActor].initialTransfo = experienceActors[noActor].getTransform();
+                }
+
+                slide.visibilityList.push({
+                    actor: experienceActors[noActor],
+                    visibility: experienceActors[noActor].visible
+                });
+            }
+
+
+            // For all slides before this one
+
+            //for (var noSlide2 = 0; noSlide2 <= noSlide; noSlide2++) {
+            var noSlide2 = noSlide;
+            var slide2 = this.data[noSlide2];
+            // for all actors in show list
+            for (var noElmt = 0; noElmt < slide2.showList.length; noElmt++) {
+                var showListActorName = slide2.showList[noElmt];
+                var elmtInVisibilityList = slide.visibilityList.filter(function(iElmt) {
+                    return (iElmt.actor.name === showListActorName)
+                })[0];
+                //console.log("Changing: " + elmtInVisibilityList.actor.name + " to: true");
+                if (elmtInVisibilityList !== null && elmtInVisibilityList !== undefined) {
+                    elmtInVisibilityList.visibility = true;
+                } else {
+                    console.error("Actor not found: " + showListActorName);
+                }
+            }
+
+            // for all actors in hide list
+            for (var noElmt = 0; noElmt < slide2.hideList.length; noElmt++) {
+                var hideListActorName = slide2.hideList[noElmt];
+                var elmtInVisibilityList = slide.visibilityList.filter(function(iElmt) {
+                    return (iElmt.actor.name === hideListActorName)
+                })[0];
+                //console.log("Changing: " + elmtInVisibilityList.actor.name + " to: false");
+                if (elmtInVisibilityList !== null && elmtInVisibilityList !== undefined) {
+                    elmtInVisibilityList.visibility = false;
+                } else {
+                    console.error("Actor not found: " + hideListActorName);
+                }
+
+            }
+            //}
+        }
+
+    } else {
+        for (var noSlide = 0; noSlide < this.data.length; noSlide++) {
+            var slide = this.data[noSlide];
+            console.log("Creating visibility list for slide: " + noSlide);
+            slide.visibilityList = [];
+
+            // For all slides before this one
+            /*for (var noSlide2 = 0; noSlide2 <= noSlide; noSlide2++)*/
+            var slide2 = this.data[noSlide];
+            // for all actors in show list
+            for (var noElmt = 0; noElmt < slide2.showList.length; noElmt++) {
+                slide.visibilityList.push({
+                    actor: slide2.showListActors[noElmt],
+                    visibility: true
+                });
+            }
+
+            // for all actors in hide list
+            for (var noElmt = 0; noElmt < slide2.hideList.length; noElmt++) {
+                var hideListActorName = slide2.hideList[noElmt];
+                slide.visibilityList.push({
+                    actor: slide2.hideListActors[noElmt],
+                    visibility: false
+                });
+            }
+        }
+    }
+
+    // debug printing
+    /*
+        for (var noSlide = 0; noSlide < this.data.length; noSlide++) {
+            var slide = this.data[noSlide];
+            console.log("Slide " + slide.shortDesc + " visibility list: ");
+            for (var noElmt = 0; noElmt < slide.visibilityList.length; noElmt++) {
+                console.log("  - " + slide.visibilityList[noElmt].actor.name + ": " + slide.visibilityList[noElmt].visibility);
+            }
+        }
+        */
+};
+
+beScript.createThumbnail = function(iCam) {
+    var thumbnail = this.generateThumbnail(iCam);
+    var imageSrc = "data:image/jpeg;base64," + thumbnail;
+    //this.sendDataToWeb("generateThumnail", imageSrc);
+    return imageSrc;
+};
+
+beScript.generateThumbnail = function(iCamera) {
+    var stuIRep = this.thumbnailActor.StuIRepresentation;
+    //var stuIRep = this.getACtor().getExperience();
+
+    var viewPoint = {
+        'iEye.x': iCamera.getPosition().x,
+        'iEye.y': iCamera.getPosition().y,
+        'iEye.z': iCamera.getPosition().z,
+        'iSight.x': iCamera.getForward().x,
+        'iSight.y': iCamera.getForward().y,
+        'iSight.z': iCamera.getForward().z,
+        'iUp.x': iCamera.getUp().x,
+        'iUp.y': iCamera.getUp().y,
+        'iUp.z': iCamera.getUp().z,
+        'projection': 0,
+        'focal': iCamera.focalLength
+    };
+
+    //480,128
+    var size = {
+        'width': 256,
+        'height': 256
+    };
+
+    var svs = new StuVisuServices();
+    var img = svs.GenerateThumbnail(stuIRep, viewPoint, size);
+
+    return img.GetBase64();
+};
+
+
+beScript.sendDataToWeb = function(iMethod, iParams) {
+    /*
+    if (this.scenarioUI !== null && this.scenarioUI !== undefined) {
+        var data = JSON.stringify(iParams);
+        //console.log("Sending stringified data: " + data);
+        var cmd = iMethod + "(" + data + ");";
+        this.scenarioUI.script = cmd;
+    } else {
+        console.error("Invalid scenarioUI actor, cannot send data");
+    }*/
+};
+
+beScript.UIWebMessageReceived = function(iEvent) {
+    var msg = JSON.parse(iEvent.sender.message);
+    //console.log("UIWebMessage received: " + msg.header + ", " + msg.message);
+    switch (msg.header) {
+        case "ACTIVATE_SLIDE":
+            var slideID = msg.message;
+            this.activateSlide(slideID);
+            break;
+    }
+};
+
+beScript.onAllKeyboardPress = function(iEvent) {
+    if (iEvent.getKey() === EP.Keyboard.EKey.eS) {
+        // key A has been pressed
+        console.log("S pressed");
+        this.activateSlide(1);
+    }
+}
+
+beScript.onAllGamepadPressEvent = function(iGamepadPressEvent) {
+    var button = iGamepadPressEvent.getButton();
+    console.log(button);
+    switch (button) {
+        case EP.Gamepad.EButton.e2:
+            console.log("Gamepad pressed: " + button + ", current slide: " + this.currentSlide);
+            // intro
+            if ((Number(this.currentSlide) >= 0) && (Number(this.currentSlide) <= 1)) {
+                this.activateSlide(2);
+                this.sendDataToWeb("changeFocus", 2);
+                console.log("activating 2");
+                break;
+            };
+            // 7am
+            if (Number(this.currentSlide) === 2) {
+                this.activateSlide(3);
+                console.log("activating 3");
+                this.sendDataToWeb("changeFocus", 3);
+                break;
+            };
+            // 8am
+            if ((Number(this.currentSlide) >= 3) && (Number(this.currentSlide) <= 4)) {
+                this.activateSlide(5);
+                this.sendDataToWeb("changeFocus", 5);
+
+                console.log("activating 5");
+
+                break;
+            };
+            // 7pm
+            if ((Number(this.currentSlide) >= 5) && (Number(this.currentSlide) <= 6)) {
+                this.activateSlide(7);
+                this.sendDataToWeb("changeFocus", 7);
+
+                console.log("activating 7");
+
+                break;
+            };
+            // 9pm
+            if ((Number(this.currentSlide) >= 7) && (Number(this.currentSlide) <= 9)) {
+                this.activateSlide(2);
+                this.sendDataToWeb("changeFocus", 2);
+
+                console.log("activating 2");
+
+                break;
+            };
+        case EP.Gamepad.EButton.e4:
+            console.log("Gamepad pressed: " + button);
+            // intro
+            if ((Number(this.currentSlide) >= 0) && (Number(this.currentSlide) <= 1)) {
+                break;
+            };
+            // 7am
+            if (Number(this.currentSlide) === 2) {
+                this.activateSlide(0);
+                this.sendDataToWeb("changeFocus", 0);
+
+                break;
+            };
+            // 8am
+            if ((Number(this.currentSlide) >= 3) && (Number(this.currentSlide) <= 4)) {
+                this.activateSlide(2);
+                this.sendDataToWeb("changeFocus", 2);
+
+                break;
+            };
+            // 7pm
+            if ((Number(this.currentSlide) >= 5) && (Number(this.currentSlide) <= 6)) {
+                this.activateSlide(5);
+                this.sendDataToWeb("changeFocus", 5);
+
+                break;
+            };
+            // 9pm
+            if ((Number(this.currentSlide) >= 7) && (Number(this.currentSlide) <= 9)) {
+                this.activateSlide(7);
+                this.sendDataToWeb("changeFocus", 7);
+
+                break;
+            };
+            break;
+        default:
+            break;
+    }
+};
